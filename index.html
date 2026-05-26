@@ -1354,10 +1354,10 @@ textarea { min-height: 90px; line-height: 1.5; }
       <span class="logo-title">Magic Kamera Preset <span>Builder</span></span>
     </div>
     <nav class="header-nav">
-      <button class="nav-btn active" onclick="scrollToSection('#builder-section')">Builder</button>
-      <button class="nav-btn" onclick="scrollToSection('#presets-section')">Presets</button>
-      <button class="nav-btn" onclick="scrollToSection('#github-section')">GitHub Guide</button>
-    </nav>
+        <button class="nav-btn active" onclick="scrollToSection('#builder-section')">Builder</button>
+        <button class="nav-btn" onclick="scrollToSection('#presets-section')">Presets</button>
+        <button class="nav-btn" onclick="scrollToSection('#github-section')">Github Guide</button>
+      </nav>
   </div>
 </header>
 
@@ -1471,6 +1471,9 @@ textarea { min-height: 90px; line-height: 1.5; }
         <span class="tmpl-chip blue" onclick="appendInstr('background')">Background Treatment</span>
         <span class="tmpl-chip blue" onclick="appendInstr('composition')">Composition Rules</span>
         <span class="tmpl-chip blue" onclick="appendInstr('option_reqs')">Per-Option Requirements</span>
+        <span class="tmpl-chip blue" onclick="appendInstr('detail')">Fine Detail</span>
+        <span class="tmpl-chip blue" onclick="appendInstr('environment')">Environment Integration</span>
+        <span class="tmpl-chip blue" onclick="appendInstr('no_background_change')">Lock Background</span>
         <span class="tmpl-chip red" onclick="clearField('preset-additional')">✕ Clear</span>
       </div>
       <textarea id="preset-additional" placeholder="Optional extra instructions, quality requirements, option-specific rules..." rows="3"></textarea>
@@ -1755,12 +1758,18 @@ const DB_NAME    = 'R1PresetBuilder';
 const DB_VERSION = 1;
 const STORE      = 'presets';
 
-const PRESET_CATEGORIES = [
+let PRESET_CATEGORIES = [
   'ART STYLE', 'PORTRAIT', 'NATURE', 'ARCHITECTURE', 'ABSTRACT',
   'ILLUSTRATION', 'SCI-FI', 'FANTASY', 'HISTORICAL', 'FUN AND CREATIVE',
   'PHOTOGRAPHY', 'FOOD', 'ANIMALS', 'TRAVEL', 'TECHNOLOGY',
-  'OPTIONS', 'HUMOR', 'SOCIAL MEDIA', 'SATIRE', 'BEAUTY FILTER'
+  'OPTIONS', 'HUMOR', 'SOCIAL MEDIA', 'SATIRE', 'BEAUTY FILTER',
+  'HORROR', 'VINTAGE', 'MINIMALIST', 'NEON', 'CINEMATIC',
+  'CARTOON', 'ANIME', 'WATERCOLOR', 'SKETCH', 'PIXEL ART',
+  'HOLIDAY', 'SPORTS', 'URBAN', 'UNDERWATER', 'SPACE',
+  'FASHION', 'INTERIOR DESIGN', 'VEHICLES', 'WEATHER', 'SEASONAL'
 ];
+// Permanent snapshot of the built-in categories — used to tell custom ones apart
+const CORE_CATEGORIES = [...PRESET_CATEGORIES];
 
 // ── Message Templates ──────────────────────────────────────────────────
 const PRESET_TEMPLATES = {
@@ -1861,7 +1870,10 @@ const INSTRUCTION_SNIPPETS = {
   lighting: `Apply dramatic cinematic lighting with strong directional light sources, deep shadows, and rich contrast.`,
   background: `BACKGROUND TREATMENT:\n• Apply a bokeh blur to the background for subject separation\n• Keep the background contextually appropriate to the transformation`,
   composition: `COMPOSITION:\n• Maintain the original framing and perspective of the captured image\n• Subject should remain centered and prominent\n• Preserve the original aspect ratio`,
-  option_reqs: `OPTION REQUIREMENTS:\nOPTION 001:\n• [Describe specific requirements for Option 001]\n• [Add visual details, style notes, special rules]\n\nOPTION 002:\n• [Describe specific requirements for Option 002]\n• [Add visual details, style notes, special rules]`
+  option_reqs: `OPTION REQUIREMENTS:\nOPTION 001:\n• [Describe specific requirements for Option 001]\n• [Add visual details, style notes, special rules]\n\nOPTION 002:\n• [Describe specific requirements for Option 002]\n• [Add visual details, style notes, special rules]`,
+  detail: `FINE DETAIL:\n• Maximize texture detail in [DESCRIBE AREA — e.g. fabric, skin, foliage]\n• Render fine details such as [hair strands / surface grain / micro-expressions] with high fidelity\n• Avoid over-smoothing or plastic-like rendering`,
+  environment: `ENVIRONMENT INTEGRATION:\n• The subject must appear naturally embedded in the new environment\n• Match lighting direction and color temperature between subject and background\n• Add appropriate shadows, reflections, or ambient effects`,
+  no_background_change: `Do not alter, replace, or significantly modify the background. Only apply changes to the foreground subject.`
 };
 
 // ════════════════════════════════════════
@@ -1934,16 +1946,40 @@ function dbDelete(id) {
 // ════════════════════════════════════════
 async function init() {
   await initDB();
+  
+  // Load custom categories from database if they exist
+  try {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).get('__custom_categories__');
+    req.onsuccess = () => {
+      if (req.result && req.result.savedList) {
+        req.result.savedList.forEach(cat => {
+          if (!PRESET_CATEGORIES.includes(cat)) {
+            PRESET_CATEGORIES.push(cat);
+          }
+        });
+        renderCategoryChips();
+      }
+    };
+  } catch(e) { console.log(e); }
+
   renderCategoryChips();
   renderFlatOptions();
   renderOptionGroups();
   allPresets = await dbGetAll();
+
+  // Filter out the custom categories row so it doesn't try to render as a saved preset card
+  allPresets = allPresets.filter(p => p.id !== '__custom_categories__');
+
   renderPresetList();
   document.getElementById('search-input').addEventListener('input', e => {
     renderPresetList(e.target.value.trim());
   });
   document.getElementById('custom-cat-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); addCustomCategory(); }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addCustomCategory();
+    }
   });
 }
 
@@ -2013,12 +2049,84 @@ function clearField(id) {
 // ════════════════════════════════════════
 function renderCategoryChips() {
   const container = document.getElementById('cat-chips');
-  container.innerHTML = PRESET_CATEGORIES.map(cat => `
-    <span class="cat-chip ${selectedCats.includes(cat) ? 'selected' : ''}"
-          onclick="toggleCat('${cat.replace(/'/g,"\\'")}')">
-      ${cat}
-    </span>
-  `).join('');
+  container.innerHTML = '';
+
+  PRESET_CATEGORIES.forEach(cat => {
+    const isSelected = selectedCats.includes(cat);
+
+    const chip = document.createElement('span');
+    chip.className = `cat-chip ${isSelected ? 'selected' : ''}`;
+    chip.style.display = 'inline-flex';
+    chip.style.alignItems = 'center';
+    chip.style.gap = '6px';
+
+    const textSpan = document.createElement('span');
+    textSpan.textContent = cat;
+    textSpan.style.cursor = 'pointer';
+    textSpan.addEventListener('click', () => toggleCat(cat));
+    chip.appendChild(textSpan);
+
+    // CORE_CATEGORIES is the permanent snapshot defined at the top of the file.
+    // Any category NOT in it is a custom one the user created.
+    const isCustom = !CORE_CATEGORIES.includes(cat);
+
+    if (isCustom) {
+      const deleteBtn = document.createElement('span');
+      deleteBtn.innerHTML = '&times;';
+      deleteBtn.style.cursor = 'pointer';
+      deleteBtn.style.fontWeight = 'bold';
+      deleteBtn.style.padding = '0 2px';
+      deleteBtn.style.color = 'var(--red)';
+      deleteBtn.style.opacity = '0.7';
+
+      deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+
+        // Remove from the master list using splice (works with let arrays)
+        const idx = PRESET_CATEGORIES.indexOf(cat);
+        if (idx !== -1) PRESET_CATEGORIES.splice(idx, 1);
+
+        // Remove from the selected list if it was selected
+        const sidx = selectedCats.indexOf(cat);
+        if (sidx !== -1) selectedCats.splice(sidx, 1);
+
+        // Save only the custom categories to IndexedDB
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put({
+          id: '__custom_categories__',
+          savedList: PRESET_CATEGORIES.filter(c => !CORE_CATEGORIES.includes(c))
+        });
+
+        renderCategoryChips();
+        renderSelectedCats();
+        showToast('Custom category removed permanently.', 'info');
+      });
+      chip.appendChild(deleteBtn);
+    }
+
+    container.appendChild(chip);
+  });
+}
+
+function removeCustomCategoryFromApp(categoryName) {
+  // Remove from the master list using splice (works with let arrays)
+  const idx = PRESET_CATEGORIES.indexOf(categoryName);
+  if (idx !== -1) PRESET_CATEGORIES.splice(idx, 1);
+
+  // Remove from the selected list if it was selected
+  const sidx = selectedCats.indexOf(categoryName);
+  if (sidx !== -1) selectedCats.splice(sidx, 1);
+
+  // Save only the custom categories to IndexedDB
+  const tx = db.transaction(STORE, 'readwrite');
+  tx.objectStore(STORE).put({
+    id: '__custom_categories__',
+    savedList: PRESET_CATEGORIES.filter(c => !CORE_CATEGORIES.includes(c))
+  });
+
+  renderCategoryChips();
+  renderSelectedCats();
+  showToast('Custom category deleted successfully.', 'info');
 }
 
 function toggleCat(cat) {
@@ -2047,12 +2155,34 @@ function renderSelectedCats() {
 
 function addCustomCategory() {
   const input = document.getElementById('custom-cat-input');
-  const val   = input.value.trim();
+  // Enforce consistent uppercase syntax across the app environment
+  const val = input.value.trim().toUpperCase(); 
   if (!val) return;
+
+  // Stop attempts to recreate built-in categories
+  if (CORE_CATEGORIES.includes(val)) {
+    showToast('This category is built into the system core.', 'error');
+    input.value = '';
+    return;
+  }
+
+  // Inject unique items into memory array and synchronize DB row
+  if (!PRESET_CATEGORIES.includes(val)) {
+    PRESET_CATEGORIES.push(val);
+    
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put({
+      id: '__custom_categories__',
+      savedList: PRESET_CATEGORIES.filter(c => !CORE_CATEGORIES.includes(c))
+    });
+  }
+
   if (!selectedCats.includes(val)) {
     selectedCats.push(val);
     renderSelectedCats();
   }
+  
+  renderCategoryChips();
   input.value = '';
 }
 
@@ -2542,25 +2672,38 @@ function toggleStep(id) {
 // ════════════════════════════════════════
 function scrollToSection(selector) {
   const el = document.querySelector(selector);
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (el) el.scrollIntoView({ behavior: 'smooth' });
 }
 
-// Highlight active nav based on scroll position
 const SECTIONS = ['builder-section', 'presets-section', 'github-section'];
 
 function updateActiveNav() {
-  const scrollY = window.scrollY + 120; // account for sticky header height
+  const threshold = 120;
   let activeIdx = 0;
-  SECTIONS.forEach((id, idx) => {
-    const el = document.getElementById(id);
-    if (el && el.offsetTop <= scrollY) activeIdx = idx;
-  });
+
+  for (let i = SECTIONS.length - 1; i >= 0; i--) {
+    const el = document.getElementById(SECTIONS[i]);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      if (rect.top <= threshold) {
+        activeIdx = i;
+        break;
+      }
+    }
+  }
+
+  // Also catch if the user scrolls near the absolute bottom of the page
+  if ((window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 20) {
+    activeIdx = SECTIONS.length - 1;
+  }
+
   document.querySelectorAll('.nav-btn').forEach((b, i) => {
     b.classList.toggle('active', i === activeIdx);
   });
 }
 
 window.addEventListener('scroll', updateActiveNav, { passive: true });
+window.addEventListener('resize', updateActiveNav, { passive: true });
 updateActiveNav(); // set correct highlight on page load
 
 // ════════════════════════════════════════
